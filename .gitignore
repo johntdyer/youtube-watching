@@ -1,4 +1,5 @@
 config
+youtube-watching.txt
 .DS_Store
 *.code-workspace
 docker-compose.yml

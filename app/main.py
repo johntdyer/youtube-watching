@@ -48,7 +48,7 @@ def yt_history(cookie):
 
     # JSON
     try:
-        regex = r"var ytInitialData = (.*);<\/script>"
+        regex = r"var ytInitialData = (.*?);<\/script>"
         match = re.search(regex, html).group(1)
         data = json.loads(match)
 
@@ -73,20 +73,44 @@ def yt_history(cookie):
 
         return default
 
-    # OUTPUT
-    if "reelShelfRenderer" in path[0]:
-        key = path[1]["videoRenderer"]
-    else:
-        key = path[0]["videoRenderer"]
+    # OUTPUT - Handle both old videoRenderer and new lockupViewModel formats
+    video_item = None
+    for item in path:
+        if "videoRenderer" in item:
+            key = item["videoRenderer"]
+            return {
+                "channel": key["longBylineText"]["runs"][0]["text"],
+                "title": key["title"]["runs"][0]["text"],
+                "video_id": key["videoId"],
+                "duration_string": key["lengthText"]["simpleText"],
+                "thumbnail": thumbnail(key["videoId"]),
+                "original_url": f"https://www.youtube.com/watch?v={key['videoId']}",
+            }
+        elif "lockupViewModel" in item:
+            video_item = item["lockupViewModel"]
+            break
 
-    return {
-        "channel": key["longBylineText"]["runs"][0]["text"],
-        "title": key["title"]["runs"][0]["text"],
-        "video_id": key["videoId"],
-        "duration_string": key["lengthText"]["simpleText"],
-        "thumbnail": thumbnail(key["videoId"]),
-        "original_url": f"https://www.youtube.com/watch?v={key['videoId']}",
-    }
+    if video_item:
+        video_id = video_item.get("contentId", "")
+        metadata = video_item.get("metadata", {}).get("lockupMetadataViewModel", {})
+        title = metadata.get("title", {}).get("content", "Unknown")
+
+        channel = "Unknown"
+        content_meta = metadata.get("metadata", {}).get("contentMetadataViewModel", {})
+        if "metadataRows" in content_meta and len(content_meta["metadataRows"]) > 0:
+            parts = content_meta["metadataRows"][0].get("metadataParts", [])
+            if len(parts) > 0:
+                channel = parts[0].get("text", {}).get("content", "Unknown")
+
+        return {
+            "channel": channel,
+            "title": title,
+            "video_id": video_id,
+            "thumbnail": thumbnail(video_id),
+            "original_url": f"https://www.youtube.com/watch?v={video_id}",
+        }
+
+    return {"error": "No video found in history"}
 
 
 class RestApi(Resource):
@@ -98,7 +122,8 @@ class RestApi(Resource):
         """
         on GET request run yt_history
         """
-        return yt_history(os.environ['COOKIE'])
+        cookie_path = os.environ.get('COOKIE', '/Users/jdyer/development/youtube-watching/app/youtube-watching.txt')
+        return yt_history(cookie_path)
 
 
 api.add_resource(RestApi, "/")
