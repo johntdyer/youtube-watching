@@ -30,6 +30,7 @@ def log_request():
 def yt_history(cookie):
     """
     get latest video from youtube history excluding reel shelf (shorts)
+    Returns tuple of (data, status_code) for proper HTTP response handling
     """
 
     # COOKIES
@@ -65,7 +66,7 @@ def yt_history(cookie):
     logger.info(f"YouTube response status: {response.status_code}, length: {len(html)}")
     if response.status_code != 200:
         logger.error(f"Failed to fetch YouTube history: {response.status_code}")
-        return {"error": f"Failed to fetch YouTube history: HTTP {response.status_code}"}
+        return {"error": f"Failed to fetch YouTube history: HTTP {response.status_code}"}, 502
 
     # Debug: save first 2000 chars to check what we're getting
     if "ytInitialData" not in html:
@@ -78,7 +79,7 @@ def yt_history(cookie):
         if not match:
             logger.error("Could not find ytInitialData in response. Cookies may be invalid or expired.")
             logger.debug(f"Response length: {len(html)}, Response snippet: {html[:500]}")
-            return {"error": "Could not parse YouTube response - cookies may be invalid or expired"}
+            return {"error": "Cookie authentication failed - upstream cookies are invalid or expired"}, 401
 
         data = json.loads(match.group(1))
         path = data["contents"]["twoColumnBrowseResultsRenderer"]\
@@ -88,7 +89,7 @@ def yt_history(cookie):
     except (AttributeError, KeyError, json.JSONDecodeError) as data_error:
         logger.error(f"Failed to parse YouTube data: {data_error}")
         logger.debug(f"Response snippet: {html[:1000]}")
-        return {"error": "Could not parse YouTube response - update or refresh cookies"}
+        return {"error": "Cookie authentication failed - could not parse YouTube response"}, 401
 
     # THUMBNAIL
     def thumbnail(fid):
@@ -118,7 +119,8 @@ def yt_history(cookie):
             if "button" in item["messageRenderer"]:
                 button_text = item["messageRenderer"]["button"].get("buttonRenderer", {}).get("text", {}).get("runs", [])
                 if button_text and "sign in" in button_text[0].get("text", "").lower():
-                    return {"error": "Cookies appear to be invalid or expired. Please refresh your YouTube cookies."}
+                    logger.error("YouTube requested sign-in - cookies have expired")
+                    return {"error": "Cookie authentication failed - YouTube requires sign-in"}, 401
             continue
         elif "videoRenderer" in item:
             key = item["videoRenderer"]
