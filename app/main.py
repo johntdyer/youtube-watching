@@ -4,15 +4,27 @@ youtube-watching
 
 import os
 import sys
+import logging
 from http.cookiejar import MozillaCookieJar
 import json
 import re
 import requests
-from flask import Flask
+from flask import Flask, request
 from flask_restful import Resource, Api
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 api = Api(app)
+
+
+@app.before_request
+def log_request():
+    logger.info(f"Incoming {request.method} request to {request.path} from {request.remote_addr}")
 
 
 def yt_history(cookie):
@@ -22,7 +34,7 @@ def yt_history(cookie):
 
     # COOKIES
     cookie_jar = MozillaCookieJar(cookie)
-
+    print("starting")
     try:
         cookie_jar.load(ignore_discard=True, ignore_expires=True)
 
@@ -33,32 +45,50 @@ def yt_history(cookie):
     # SESSION
     session = requests.Session()
     session.headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)\
-            AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-us,en;q=0.5",
+        "Accept-Language": "en-US,en;q=0.9",
         "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Dest": "document",
     }
     session.cookies = cookie_jar
+    logger.debug(f"Loaded {len(cookie_jar)} cookies for YouTube request")
+
+    # Establish session first
+    session.get("https://www.youtube.com/", timeout=10)
 
     # RESPONSE
     response = session.get("https://www.youtube.com/feed/history")
     cookie_jar.save(ignore_discard=True, ignore_expires=True)
     html = response.text
+    logger.info(f"YouTube response status: {response.status_code}, length: {len(html)}")
+    if response.status_code != 200:
+        logger.error(f"Failed to fetch YouTube history: {response.status_code}")
+        return {"error": f"Failed to fetch YouTube history: HTTP {response.status_code}"}
+
+    # Debug: save first 2000 chars to check what we're getting
+    if "ytInitialData" not in html:
+        logger.debug(f"Response snippet (first 1000 chars): {html[:1000]}")
 
     # JSON
     try:
         regex = r"var ytInitialData = (.*?);<\/script>"
-        match = re.search(regex, html).group(1)
-        data = json.loads(match)
+        match = re.search(regex, html)
+        if not match:
+            logger.error("Could not find ytInitialData in response. Cookies may be invalid or expired.")
+            logger.debug(f"Response length: {len(html)}, Response snippet: {html[:500]}")
+            return {"error": "Could not parse YouTube response - cookies may be invalid or expired"}
 
+        data = json.loads(match.group(1))
         path = data["contents"]["twoColumnBrowseResultsRenderer"]\
             ["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]\
             ["contents"][0]["itemSectionRenderer"]["contents"]
 
-    except AttributeError as data_error:
-        print(f"WARNING: Can't find data, update cookie file\nDEBUG: {data_error}")
-        sys.exit()
+    except (AttributeError, KeyError, json.JSONDecodeError) as data_error:
+        logger.error(f"Failed to parse YouTube data: {data_error}")
+        logger.debug(f"Response snippet: {html[:1000]}")
+        return {"error": "Could not parse YouTube response - update or refresh cookies"}
 
     # THUMBNAIL
     def thumbnail(fid):
@@ -75,8 +105,22 @@ def yt_history(cookie):
 
     # OUTPUT - Handle both old videoRenderer and new lockupViewModel formats
     video_item = None
-    for item in path:
-        if "videoRenderer" in item:
+    for i, item in enumerate(path):
+        if "messageRenderer" in item:
+            msg_text = "Unknown message"
+            text_obj = item["messageRenderer"].get("text", {})
+            if "runs" in text_obj and len(text_obj["runs"]) > 0:
+                msg_text = text_obj["runs"][0].get("text", "Unknown message")
+            elif "simpleText" in text_obj:
+                msg_text = text_obj["simpleText"]
+
+            logger.warning(f"YouTube returned message instead of video: {msg_text}")
+            if "button" in item["messageRenderer"]:
+                button_text = item["messageRenderer"]["button"].get("buttonRenderer", {}).get("text", {}).get("runs", [])
+                if button_text and "sign in" in button_text[0].get("text", "").lower():
+                    return {"error": "Cookies appear to be invalid or expired. Please refresh your YouTube cookies."}
+            continue
+        elif "videoRenderer" in item:
             key = item["videoRenderer"]
             return {
                 "channel": key["longBylineText"]["runs"][0]["text"],
@@ -122,12 +166,33 @@ class RestApi(Resource):
         """
         on GET request run yt_history
         """
-        cookie_path = os.environ.get('COOKIE', '/Users/jdyer/development/youtube-watching/app/youtube-watching.txt')
+        cookie_path = os.environ.get('COOKIE', '/Users/jdyer/development/youtube-watching/youtube-watching.txt')
         return yt_history(cookie_path)
 
 
 api.add_resource(RestApi, "/")
 
+
+def validate_cookie_file(cookie_path):
+    """Validate cookie file exists and is readable."""
+    logger.info(f"Validating cookie file: {cookie_path}")
+
+    if not os.path.exists(cookie_path):
+        logger.error(f"Cookie file not found: {cookie_path}")
+        sys.exit(1)
+
+    try:
+        cookie_jar = MozillaCookieJar(cookie_path)
+        cookie_jar.load(ignore_discard=True, ignore_expires=True)
+        logger.info(f"Cookie file validated successfully, loaded {len(cookie_jar)} cookies")
+    except Exception as e:
+        logger.error(f"Invalid cookie file {cookie_path}: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     from waitress import serve
+    cookie_path = os.environ.get('COOKIE', '/Users/jdyer/development/youtube-watching/youtube-watching.txt')
+    validate_cookie_file(cookie_path)
+    logger.info("Starting youtube-watching app on 0.0.0.0:5678")
     serve(app, host="0.0.0.0", port=5678)
