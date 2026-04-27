@@ -194,7 +194,10 @@ def validate_cookie_file(cookie_path):
 
 if __name__ == "__main__":
     from waitress import serve
-    cookie_path = os.environ.get('COOKIE', '/Users/jdyer/development/youtube-watching/youtube-watching.txt')
+    cookie_path = os.environ.get('COOKIE')
+    if not cookie_path:
+        logger.error("COOKIE environment variable not set")
+        sys.exit(1)
     validate_cookie_file(cookie_path)
     logger.info("Starting youtube-watching app on 0.0.0.0:5678")
     serve(app, host="0.0.0.0", port=5678)
